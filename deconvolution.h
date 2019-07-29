@@ -35,7 +35,72 @@ extern "C" {
 #ifndef DECONVOLUTION_H_
 #define DECONVOLUTION_H_
 
-	// Add content here...
+	// Global toggle switch for single
+	// or double precision calculations
+	#define SINGLE_PRECISION 0
+
+	#if SINGLE_PRECISION
+		#define PRECISION float
+		#define PRECISION2 float2
+		#define PRECISION3 float3
+		#define PRECISION4 float4
+	#else
+		#define PRECISION double
+		#define PRECISION2 double2
+		#define PRECISION3 double3
+		#define PRECISION4 double4
+	#endif
+
+	#if SINGLE_PRECISION
+		#define SIN(x) sinf(x)
+		#define COS(x) cosf(x)
+		#define ABS(x) fabsf(x)
+		#define SQRT(x) sqrtf(x)
+		#define ROUND(x) roundf(x)
+		#define CEIL(x) ceilf(x)
+		#define FLOOR(x) floorf(x)
+		#define MAKE_PRECISION2(x,y) make_float2(x,y)
+		#define MAKE_PRECISION3(x,y,z) make_float3(x,y,z)
+		#define MAKE_PRECISION4(x,y,z,w) make_float4(x,y,z,w)
+	#else
+		#define SIN(x) sin(x)
+		#define COS(x) cos(x)
+		#define ABS(x) fabs(x)
+		#define SQRT(x) sqrt(x)
+		#define ROUND(x) round(x)
+		#define FLOOR(x) floor(x)
+		#define CEIL(x) ceil(x)
+		#define MAKE_PRECISION2(x,y) make_double2(x,y)
+		#define MAKE_PRECISION3(x,y,z) make_double3(x,y,z)
+		#define MAKE_PRECISION4(x,y,z,w) make_double4(x,y,z,w)
+	#endif
+
+	typedef struct Config {
+		unsigned int image_size;
+		unsigned int psf_size;
+		unsigned int number_minor_cycles;
+		// unsigned int maximum_sources_per_cycle;
+		double loop_gain;
+		char *dirty_real_file;
+		char *dirty_imag_file;
+		char *residual_real_file;
+		char *residual_imag_file;
+		char *model_real_file;
+		char *model_imag_file;
+		char *psf_real_file;
+		char *psf_imag_file;
+	} Config;
+
+	typedef struct Complex {
+		PRECISION real;
+		PRECISION imag;
+	} Complex;
+
+	typedef struct Source {
+		PRECISION l;
+		PRECISION m;
+		PRECISION intensity;
+	} Source;
 
 #endif /* DECONVOLUTION_H_ */
 
