@@ -30,7 +30,50 @@
 
 #include <cstdlib>
 
+#include "deconvolution.h"
+
 int main(int argc, char **argv)
 {
+	// Initialise the config
+	Config config;
+	init_config(&config);
+
+	// Allocate memory for images (residual/model), and PSF kernel
+	Complex *residual = NULL;
+	Complex *model = NULL;
+	Complex *psf = NULL;
+	allocate_image_resources(&residual, &model, &psf, config.image_size, config.psf_size);
+
+	if(residual == NULL || model == NULL || psf == NULL)
+	{
+		printf(">>> ERROR: Unable to allocate required resources, terminating...\n\n");
+		clean_up(&residual, &model, &psf);
+		return EXIT_FAILURE;
+	}
+
+	// Load dirty image into memory as residual
+	bool loaded_dirty = load_image_from_file(residual, config.dirty_real_file, 
+		config.dirty_imag_file, config.image_size);
+	// Load point spread function kernel into memory
+	bool loaded_psf = load_image_from_file(psf, config.psf_real_file, 
+		config.psf_imag_file, config.psf_size);
+
+	if(!loaded_dirty || !loaded_psf)
+	{
+		printf(">>> ERROR: Unable to load dirty or psf image from file, terminating...\n\n");
+		clean_up(&residual, &model, &psf);
+		return EXIT_FAILURE;
+	}
+
+	// Perform CLEAN
+	performing_deconvolution(&config, residual, model, psf);
+
+	// Save model and residual images to file
+	save_image_to_file(model, config.model_real_file, config.model_imag_file, config.image_size);
+	save_image_to_file(residual, config.residual_real_file, config.residual_imag_file, config.image_size);
+
+	// Clean up resources
+	clean_up(&residual, &model, &psf);
+
 	return EXIT_SUCCESS;
 }
