@@ -29,6 +29,7 @@
 // POSSIBILITY OF SUCH DAMAGE.  
 
 #include <cstdlib>
+#include <cstdio>
 
 #include "deconvolution.h"
 
@@ -39,10 +40,12 @@ int main(int argc, char **argv)
 	init_config(&config);
 
 	// Allocate memory for images (residual/model), and PSF kernel
-	Complex *residual = NULL;
-	Complex *model = NULL;
-	Complex *psf = NULL;
-	allocate_image_resources(&residual, &model, &psf, config.image_size, config.psf_size);
+	printf(">>> UPDATE: Allocating resources for deconvolution...\n\n");
+	PRECISION *residual = NULL;
+	Source *model = NULL;
+	PRECISION *psf = NULL;
+	allocate_resources(&residual, &model, &psf, config.image_size,
+		config.psf_size, config.number_minor_cycles);
 
 	if(residual == NULL || model == NULL || psf == NULL)
 	{
@@ -51,12 +54,11 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
+	printf(">>> UPDATE: Loading dirty image and PSF into memory...\n\n");
 	// Load dirty image into memory as residual
-	bool loaded_dirty = load_image_from_file(residual, config.dirty_real_file, 
-		config.dirty_imag_file, config.image_size);
+	bool loaded_dirty = load_image_from_file(residual, config.image_size, config.dirty_input_image);
 	// Load point spread function kernel into memory
-	bool loaded_psf = load_image_from_file(psf, config.psf_real_file, 
-		config.psf_imag_file, config.psf_size);
+	bool loaded_psf = load_image_from_file(psf, config.psf_size, config.psf_input_file);
 
 	if(!loaded_dirty || !loaded_psf)
 	{
@@ -66,14 +68,22 @@ int main(int argc, char **argv)
 	}
 
 	// Perform CLEAN
+	printf(">>> UPDATE: Performing deconvolution...\n\n");
 	performing_deconvolution(&config, residual, model, psf);
+	printf(">>> UPDATE: Deconvolution complete...\n\n");
+	
+	printf(">>> UPDATE: Saving model sources to file...\n\n");
+	// Save model sources to file
+	save_sources_to_file(model, config.number_minor_cycles, config.model_output_file);
 
-	// Save model and residual images to file
-	save_image_to_file(model, config.model_real_file, config.model_imag_file, config.image_size);
-	save_image_to_file(residual, config.residual_real_file, config.residual_imag_file, config.image_size);
+	printf(">>> UPDATE: Saving residual output image to file...\n\n");
+	//save the residual image to file (optional?)
+	save_image_to_file(residual, config.image_size, config.residual_output_image);
 
 	// Clean up resources
+	printf(">>> UPDATE: Cleaning up resources...\n\n");
 	clean_up(&residual, &model, &psf);
+	printf(">>> UPDATE: Clean up complete, exiting...\n\n");
 
 	return EXIT_SUCCESS;
 }

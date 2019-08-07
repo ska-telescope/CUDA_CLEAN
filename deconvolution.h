@@ -35,6 +35,9 @@ extern "C" {
 #ifndef DECONVOLUTION_H_
 #define DECONVOLUTION_H_
 
+	#include <cuda.h>
+	#include <cuda_runtime_api.h>
+
 	// Global toggle switch for single
 	// or double precision calculations
 	#define SINGLE_PRECISION 0
@@ -75,20 +78,21 @@ extern "C" {
 		#define MAKE_PRECISION4(x,y,z,w) make_double4(x,y,z,w)
 	#endif
 
+	#define CUDA_CHECK_RETURN(value) check_cuda_error_aux(__FILE__,__LINE__, #value, value)
+
 	typedef struct Config {
 		unsigned int image_size;
 		unsigned int psf_size;
 		unsigned int number_minor_cycles;
 		// unsigned int maximum_sources_per_cycle;
 		double loop_gain;
-		char *dirty_real_file;
-		char *dirty_imag_file;
-		char *residual_real_file;
-		char *residual_imag_file;
-		char *model_real_file;
-		char *model_imag_file;
-		char *psf_real_file;
-		char *psf_imag_file;
+		char *dirty_input_image;
+		char *residual_output_image;
+		char *model_output_file;
+		char *psf_input_file;
+		double cell_size;
+		int gpu_max_threads_per_block_dimension;
+		int gpu_max_threads_per_block;
 	} Config;
 
 	typedef struct Complex {
@@ -101,6 +105,33 @@ extern "C" {
 		PRECISION m;
 		PRECISION intensity;
 	} Source;
+
+	void performing_deconvolution(Config *config, PRECISION *dirty_image, Source *model, PRECISION *psf);
+
+	void init_config(Config *config);
+
+	void allocate_resources(PRECISION **dirty_image, Source **model, PRECISION **psf,
+		unsigned int image_size, unsigned int psf_size, unsigned int num_minor_cycles);
+
+	bool load_image_from_file(PRECISION *image, unsigned int size, char *input_file);
+
+	void save_sources_to_file(Source *source, unsigned int number_of_sources, char *output_file);
+
+	void save_image_to_file(PRECISION *image, unsigned int size, char *real_file);
+
+	void clean_up(PRECISION **dirty, Source **model, PRECISION **psf);
+
+	__global__ void find_max_source_row_reduction(const PRECISION *residual, PRECISION3 *local_max, const int image_size);
+
+	__global__ void find_max_source_col_reduction(PRECISION3 *sources, const PRECISION3 *local_max, const int cycle_number,
+		const int image_size, const PRECISION loop_gain, const double flux);
+
+	__global__ void subtract_psf_from_residual(PRECISION *residual, PRECISION3 *sources, const PRECISION *psf, 
+		const int cycle_number, const int image_size, const int psf_size, const PRECISION loop_gain);
+
+	__device__ double atomic_max(double *address, double value);
+
+	static void check_cuda_error_aux(const char *file, unsigned line, const char *statement, cudaError_t err);
 
 #endif /* DECONVOLUTION_H_ */
 
