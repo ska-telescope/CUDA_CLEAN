@@ -69,12 +69,12 @@ int main(int argc, char **argv)
 
 	// Perform CLEAN
 	printf(">>> UPDATE: Performing deconvolution...\n\n");
-	performing_deconvolution(&config, residual, model, psf);
+	int number_of_cycles_completed = performing_deconvolution(&config, residual, model, psf);
 	printf(">>> UPDATE: Deconvolution complete...\n\n");
 	
 	printf(">>> UPDATE: Saving model sources to file...\n\n");
 	// Save model sources to file
-	save_sources_to_file(model, config.number_minor_cycles, config.model_output_file);
+	save_sources_to_file(model, number_of_cycles_completed, config.model_output_file);
 
 	printf(">>> UPDATE: Saving residual output image to file...\n\n");
 	//save the residual image to file (optional?)
