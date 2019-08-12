@@ -30,6 +30,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -38,6 +39,8 @@
 
 // keeps track of running sum of model sources found
 __device__ double d_flux = 0.0;
+__device__ bool d_exitConditionFound = false;
+__device__ int d_source_counter = 0;
 
 void init_config(Config *config)
 {
@@ -53,13 +56,15 @@ void init_config(Config *config)
 
 	config->gpu_max_threads_per_block_dimension = 32;
 
-	config->dirty_input_image = "../images/sample_dirty_image_1024_norm.csv";
+	config->report_flux_each_cycle = false;
 
-	config->model_output_file = "../images/sample_output_sources.csv";
+	config->dirty_input_image = "../sample_data/dirty_image_1024.csv";
 
-	config->residual_output_image = "../images/sample_output_residual.csv";
+	config->model_output_file = "../sample_data/extracted_sources.csv";
 
-	config->psf_input_file = "../images/sample_psf_1024_norm.csv";
+	config->residual_output_image = "../sample_data/residual_image_1024.csv";
+
+	config->psf_input_file = "../sample_data/point_spread_function_1024.csv";
 }
 
 void allocate_resources(PRECISION **dirty_image, Source **model, PRECISION **psf,
@@ -71,14 +76,14 @@ void allocate_resources(PRECISION **dirty_image, Source **model, PRECISION **psf
 	*model = (Source*) calloc(num_minor_cycles, sizeof(Source));
 }
 
-void performing_deconvolution(Config *config, PRECISION *dirty_image, Source *model, PRECISION *psf)
+int performing_deconvolution(Config *config, PRECISION *dirty_image, Source *model, PRECISION *psf)
 {
 	PRECISION *d_residual;
 	PRECISION3 *d_sources;
 	PRECISION3 *d_max_locals;
 	PRECISION *d_psf;
 
-	//copying dirty image over to gpu and labeled now as the residual image
+	// copying dirty image over to gpu and labeled now as the residual image
 	int image_size_square = config->image_size * config->image_size;
 	CUDA_CHECK_RETURN(cudaMalloc(&d_residual, sizeof(PRECISION) * image_size_square));
 	CUDA_CHECK_RETURN(cudaMemcpy(d_residual, dirty_image, sizeof(PRECISION) * image_size_square, cudaMemcpyHostToDevice));
@@ -108,13 +113,15 @@ void performing_deconvolution(Config *config, PRECISION *dirty_image, Source *mo
 
 	int cycle_number = 0;
 	double flux = 0.0;
+	bool exitConditionFound = false;
+
 	//starting timer here
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
 	cudaEventRecord(start);
 
-	while(cycle_number < config->number_minor_cycles)
+	while(cycle_number < config->number_minor_cycles && !exitConditionFound)
 	{
 		// Find local row maximum via reduction
 		find_max_source_row_reduction<<<reduction_blocks, reduction_threads>>>
@@ -130,10 +137,22 @@ void performing_deconvolution(Config *config, PRECISION *dirty_image, Source *mo
 				(d_residual, d_sources, d_psf, cycle_number, config->image_size, config->psf_size, config->loop_gain);
 		cudaDeviceSynchronize();
 
-  		// cudaMemcpyFromSymbol(&flux, d_flux, sizeof(double), 0, cudaMemcpyDeviceToHost);
-		// cudaDeviceSynchronize();
+		if(config->report_flux_each_cycle)
+		{
+			cudaMemcpyFromSymbol(&flux, d_flux, sizeof(double), 0, cudaMemcpyDeviceToHost);
+			cudaDeviceSynchronize();
+		}
 
-		//printf(">>> INFO: Cycle %d reports flux: %.5e\n\n", cycle_number, flux);
+		compress_sources<<<1, 1>>>(d_sources);
+
+		cudaMemcpyFromSymbol(&exitConditionFound, d_exitConditionFound, sizeof(bool), 0, cudaMemcpyDeviceToHost);
+		cudaDeviceSynchronize();
+
+		if(exitConditionFound)
+			printf(">>> UPDATE: Terminating minor cycles as now just cleaning noise...\n\n");
+
+		if(config->report_flux_each_cycle)
+			printf(">>> INFO: Cycle %d reports flux: %.5e\n\n", cycle_number, flux);
 
 		++cycle_number;
 	}
@@ -145,20 +164,19 @@ void performing_deconvolution(Config *config, PRECISION *dirty_image, Source *mo
 	printf(">>> GPU Hogbom completed in %f ms for total cycles %d (average %f ms per cycle)...\n\n", 
 		milliseconds, cycle_number, milliseconds / cycle_number);
 
-	printf(">>> UPDATE: Copying extracted sources back from the GPU...\n\n");
-	CUDA_CHECK_RETURN(cudaMemcpy(model, d_sources, config->number_minor_cycles * sizeof(Source),
+	int number_of_sources_found = 0.0;
+	cudaMemcpyFromSymbol(&number_of_sources_found, d_source_counter, sizeof(int), 0, cudaMemcpyDeviceToHost);
+	cudaDeviceSynchronize();
+
+	printf(">>> UPDATE: Copying %d extracted sources back from the GPU...\n\n", number_of_sources_found);
+	CUDA_CHECK_RETURN(cudaMemcpy(model, d_sources, number_of_sources_found * sizeof(Source),
  		cudaMemcpyDeviceToHost));
 	cudaDeviceSynchronize();
 
-	// for(int i = 0 ; i < config->number_minor_cycles; ++i)
-	// {
-	// 	printf("Source %d found at (l, m) %f, %f with value (intensity) %.15f...\n\n",
-	// 		i, model[i].l, model[i].m, model[i].intensity);
-	// }
-
-
 	CUDA_CHECK_RETURN(cudaMemcpy(dirty_image, d_residual, sizeof(PRECISION) * image_size_square, cudaMemcpyDeviceToHost));
 	cudaDeviceSynchronize();
+
+	return number_of_sources_found;
 }
 
 __global__ void find_max_source_row_reduction(const PRECISION *residual, PRECISION3 *local_max, const int image_size)
@@ -168,13 +186,16 @@ __global__ void find_max_source_row_reduction(const PRECISION *residual, PRECISI
 	if(row_index >= image_size)
 		return;
 
-	// l, m, intensity
-	PRECISION3 max = MAKE_PRECISION3(0.0, (double) row_index, residual[row_index * image_size]);
+	// l, m, intensity 
+	// just going to borrow the "m" or y coordinate and use to find the average in this row.
+	//PRECISION3 max = MAKE_PRECISION3(0.0, (double) row_index, residual[row_index * image_size]);
+	PRECISION3 max = MAKE_PRECISION3(0.0, ABS(residual[row_index * image_size]), residual[row_index * image_size]);
 	PRECISION current;
 
 	for(int col_index = 1; col_index < image_size; ++col_index)
 	{
 		current = residual[row_index * image_size + col_index];
+		max.y += ABS(current);
 		if(ABS(current) > ABS(max.z))
 		{
 			// update m and intensity
@@ -182,7 +203,8 @@ __global__ void find_max_source_row_reduction(const PRECISION *residual, PRECISI
 			max.z = current;
 		}
 	}
-
+	//y coordinate holds the average in this row
+	max.y = max.y / image_size;
 	local_max[row_index] = max;
 }
 
@@ -194,20 +216,54 @@ __global__ void find_max_source_col_reduction(PRECISION3 *sources, const PRECISI
 	if(col_index >= 1) // only single threaded
 		return;
 
+	//obtain max from row and col and clear the y (row) coordinate.
 	PRECISION3 max = local_max[0];
-	PRECISION3 current;
+	PRECISION runningAverage = local_max[0].y;
+	max.y = 0.0;
 
+	PRECISION3 current;
+	
 	for(int index = 1; index < image_size; ++index)
 	{
 		current = local_max[index];
+		runningAverage += current.y;		
+		current.y = index;
+
 		if(ABS(current.z) > ABS(max.z))
 			max = current;
 	}
+	runningAverage /= image_size;
 
-	sources[cycle_number] = max;
-	sources[cycle_number].z *= loop_gain;
-	d_flux = flux + sources[cycle_number].z;
+	max.z *= loop_gain;
+	sources[d_source_counter] = max;
+	++d_source_counter;
+	
+	//I need to check if the source found is within 1% of the max source (source[0]) found 
+
+	d_flux = flux + max.z;
+	//d_exitConditionFound = (max.z < 2.0 * runningAverage * loop_gain);
 }
+
+
+__global__ void compress_sources(PRECISION3 *sources)
+{
+	unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if(index >= 1) // only single threaded
+		return;
+
+	PRECISION3 last_source = sources[d_source_counter - 1];
+	for(int i = d_source_counter - 2;i >= 0; --i)
+	{
+		if((int)last_source.x == (int)sources[i].x && (int)last_source.y == (int)sources[i].y)
+		{
+			sources[i].z += last_source.z;
+			--d_source_counter;
+			break;
+		}
+	}
+}
+
 
 __global__ void subtract_psf_from_residual(PRECISION *residual, PRECISION3 *sources, const PRECISION *psf, 
 	const int cycle_number, const int image_size, const int psf_size, const PRECISION loop_gain)
@@ -223,8 +279,8 @@ __global__ void subtract_psf_from_residual(PRECISION *residual, PRECISION3 *sour
 
 	// Determine image coordinates relative to source location
 	int2 image_coord = make_int2(
-		sources[cycle_number].x - half_psf_size + idx,
-		sources[cycle_number].y - half_psf_size + idy
+		sources[d_source_counter-1].x - half_psf_size + idx,
+		sources[d_source_counter-1].y - half_psf_size + idy
 	);
 	
 	// image coordinates fall out of bounds
@@ -235,64 +291,9 @@ __global__ void subtract_psf_from_residual(PRECISION *residual, PRECISION3 *sour
 	const PRECISION psf_weight = psf[idy * psf_size + idx];
 
 	// Subtract shifted psf sample from residual image
-	residual[image_coord.y * image_size + image_coord.x] -= psf_weight  * sources[cycle_number].z;
-
-
+	residual[image_coord.y * image_size + image_coord.x] -= psf_weight  * sources[d_source_counter-1].z;
 }
 
-// __global__ void find_max_in_residual_image(PRECISION *residual, PRECISION3 *sources, int cycle_number, int image_size)
-// {
-// 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
-// 	int idy = blockIdx.y*blockDim.y + threadIdx.y;
-
-// 	if(idx >= image_size || idy >= image_size)
-// 		return;
-
-
-// 	PRECISION val = residual[idy * image_size + idx];
-
-
-// 	// NO ATOMIC MAX FOR ANY FLOATING POINT NUMBERS IN CUDA (our own?)
-// 	int old_max = atomic_max(&(sources[cycle_number].z), val);
-// 	if(old_max < val)
-// 	{
-// 		// NO ATOMIC EXCH FOR DOUBLES IN CUDA (make our own?)
-// 		// https://stackoverflow.com/questions/12626096/why-has-atomicadd-not-been-implemented-for-doubles
-// 		// https://www.cse-lab.ethz.ch/wp-content/uploads/2018/05/S3101-Atomic-Memory-Operations.pdf
-// 		atomic_exchange(&(sources[cycle_number].x), (PRECISION) idx-image_size);
-// 		atomic_exchange(&(sources[cycle_number].y), (PRECISION) idy-image_size);
-// 	}
-
-// }
-
-// https://github.com/treecode/Bonsai/blob/master/runtime/profiling/derived_atomic_functions.h
-// __device__ double atomic_max(double *address, double value)
-// {
-//     unsigned long long int ret = __double_as_longlong(*address);
-//     while(value > __longlong_as_double(ret))
-//     {
-//         unsigned long long int old = ret;
-//         if((ret = atomicCAS((unsigned long long int*)address, old, __double_as_longlong(value))) == old)
-//             break;
-//     }
-//     return __longlong_as_double(ret);
-// }
-
-// __device__ double atomic_exchange(double *address, double value)
-// {
-// 	// get address as large int
-// 	unsigned long long int* address_as_ull = (unsigned long long int*) address;
-// 	// get value from large int address
-// 	unsigned long long int old = *address_as_ull;
-// 	unsigned long long int assumed;
-
-// 	do {
-// 		assumed = old;
-// 		old = atomicCAS(address_as_ull, assumed, __double_as_longlong(value));
-// 	} while (assumed != old);
-
-// 	return __longlong_as_double(old);
-// }
 
 bool load_image_from_file(PRECISION *image, unsigned int size, char *input_file)
 {
@@ -315,13 +316,8 @@ bool load_image_from_file(PRECISION *image, unsigned int size, char *input_file)
 			#else
 				fscanf(file, "%lf ", &(image[image_index]));
 			#endif
-
-			// printf("%f ", image[image_index]);
 		}
-		// printf("\n");
 	}
-
-	// printf("\n\n");
 
 	fclose(file);
 	return true;

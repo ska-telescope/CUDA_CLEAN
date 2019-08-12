@@ -35,6 +35,7 @@ extern "C" {
 #ifndef DECONVOLUTION_H_
 #define DECONVOLUTION_H_
 
+	#include <stdbool.h>
 	#include <cuda.h>
 	#include <cuda_runtime_api.h>
 
@@ -84,7 +85,6 @@ extern "C" {
 		unsigned int image_size;
 		unsigned int psf_size;
 		unsigned int number_minor_cycles;
-		// unsigned int maximum_sources_per_cycle;
 		double loop_gain;
 		char *dirty_input_image;
 		char *residual_output_image;
@@ -93,6 +93,7 @@ extern "C" {
 		double cell_size;
 		int gpu_max_threads_per_block_dimension;
 		int gpu_max_threads_per_block;
+		bool report_flux_each_cycle;
 	} Config;
 
 	typedef struct Complex {
@@ -106,7 +107,7 @@ extern "C" {
 		PRECISION intensity;
 	} Source;
 
-	void performing_deconvolution(Config *config, PRECISION *dirty_image, Source *model, PRECISION *psf);
+	int performing_deconvolution(Config *config, PRECISION *dirty_image, Source *model, PRECISION *psf);
 
 	void init_config(Config *config);
 
@@ -130,6 +131,8 @@ extern "C" {
 		const int cycle_number, const int image_size, const int psf_size, const PRECISION loop_gain);
 
 	__device__ double atomic_max(double *address, double value);
+
+	__global__ void compress_sources(PRECISION3 *sources);
 
 	static void check_cuda_error_aux(const char *file, unsigned line, const char *statement, cudaError_t err);
 
