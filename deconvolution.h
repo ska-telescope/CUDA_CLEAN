@@ -116,7 +116,7 @@ extern "C" {
 
 	bool load_image_from_file(PRECISION *image, unsigned int size, char *input_file);
 
-	void save_sources_to_file(Source *source, unsigned int number_of_sources, char *output_file);
+	void save_sources_to_file(Source *source, int number_of_sources, char *output_file);
 
 	void save_image_to_file(PRECISION *image, unsigned int size, char *real_file);
 
@@ -135,6 +135,18 @@ extern "C" {
 	__global__ void compress_sources(PRECISION3 *sources);
 
 	static void check_cuda_error_aux(const char *file, unsigned line, const char *statement, cudaError_t err);
+
+	void load_sources_from_file(Source **source, int *number_of_sources, char *input_file);
+
+	int compare_sources(const void *a, const void *b);
+
+	//**************************************//
+	//      UNIT TESTING FUNCTIONALITY      //
+	//**************************************//
+
+	void unit_test_init_config(Config *config);
+
+	PRECISION unit_test_extract_sources(Config *config);
 
 #endif /* DECONVOLUTION_H_ */
 

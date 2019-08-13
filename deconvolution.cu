@@ -31,6 +31,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <float.h>
+#include <string.h>
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -218,7 +220,7 @@ __global__ void find_max_source_col_reduction(PRECISION3 *sources, const PRECISI
 
 	//obtain max from row and col and clear the y (row) coordinate.
 	PRECISION3 max = local_max[0];
-	PRECISION runningAverage = local_max[0].y;
+	PRECISION running_avg = local_max[0].y;
 	max.y = 0.0;
 
 	PRECISION3 current;
@@ -226,20 +228,19 @@ __global__ void find_max_source_col_reduction(PRECISION3 *sources, const PRECISI
 	for(int index = 1; index < image_size; ++index)
 	{
 		current = local_max[index];
-		runningAverage += current.y;		
+		running_avg += current.y;		
 		current.y = index;
 
 		if(ABS(current.z) > ABS(max.z))
 			max = current;
 	}
-	runningAverage /= image_size;
+
+	running_avg /= image_size;
 
 	max.z *= loop_gain;
 	sources[d_source_counter] = max;
 	++d_source_counter;
 	
-	//I need to check if the source found is within 1% of the max source (source[0]) found 
-
 	d_flux = flux + max.z;
 	//d_exitConditionFound = (max.z < 2.0 * runningAverage * loop_gain);
 }
@@ -353,7 +354,7 @@ void save_image_to_file(PRECISION *image, unsigned int size, char *real_file)
 	fclose(image_file);
 }
 
-void save_sources_to_file(Source *source, unsigned int number_of_sources, char *output_file)
+void save_sources_to_file(Source *source, int number_of_sources, char *output_file)
 {
 	FILE *file = fopen(output_file, "w");
 
@@ -371,6 +372,49 @@ void save_sources_to_file(Source *source, unsigned int number_of_sources, char *
 		#else
 			fprintf(file, "%.15f %.15f %.15f\n", source[index].l, source[index].m, source[index].intensity);
 		#endif
+	}
+
+	fclose(file);
+}
+
+void load_sources_from_file(Source **source, int *number_of_sources, char *input_file)
+{
+	FILE *file = fopen(input_file, "r");
+
+	if(file == NULL)
+	{
+		printf(">>> ERROR: Unable to load sources from file...\n\n");
+		return;
+	}
+
+	// Determine number of sources to read in
+	fscanf(file, "%d\n", number_of_sources);
+	// Attempt to allocate memory
+	*source = (Source*) calloc((*number_of_sources), sizeof(Source));
+	// Determine if allocation failed
+	if(*source == NULL)
+	{
+		fclose(file);
+		return;
+	}
+
+	PRECISION temp_l = 0.0;
+	PRECISION temp_m = 0.0;
+	PRECISION temp_intensity = 0.0;
+
+	for(int index = 0; index < (*number_of_sources); ++index)
+	{
+		#if SINGLE_PRECISION
+			fscanf(file, "%f %f %f\n", &temp_l, &temp_m, &temp_intensity);
+		#else
+			fscanf(file, "%lf %lf %lf\n", &temp_l, &temp_m, &temp_intensity);
+		#endif
+
+		(*source)[index] = (Source) {
+			.l = temp_l,
+			.m = temp_m,
+			.intensity = temp_intensity
+		};
 	}
 
 	fclose(file);
@@ -394,4 +438,114 @@ void clean_up(PRECISION **dirty, Source **model, PRECISION **psf)
 	if(*dirty) free(*dirty);
 	if(*model) free(*model);
 	if(*psf)   free(*psf);
+}
+
+//**************************************//
+//      UNIT TESTING FUNCTIONALITY      //
+//**************************************//
+
+void unit_test_init_config(Config *config)
+{
+	config->image_size = 1024;
+	config->psf_size = 1024;
+	config->number_minor_cycles = 60;
+	config->loop_gain = 0.1;
+	config->gpu_max_threads_per_block = 1024;
+	config->gpu_max_threads_per_block_dimension = 32;
+	config->report_flux_each_cycle = false;
+	config->dirty_input_image = "../unit_test_data/dirty_image_1024.csv";
+	config->psf_input_file = "../unit_test_data/point_spread_function_1024.csv";
+}
+
+PRECISION unit_test_extract_sources(Config *config)
+{
+	PRECISION error = (SINGLE_PRECISION) ? FLT_MAX : DBL_MAX;
+
+	PRECISION *residual = NULL;
+	Source *model = NULL;
+	PRECISION *psf = NULL;
+	allocate_resources(&residual, &model, &psf, config->image_size,
+		config->psf_size, config->number_minor_cycles);
+
+	if(residual == NULL || model == NULL || psf == NULL)
+	{
+		printf(">>> ERROR: Unable to allocate required resources, terminating...\n\n");
+		clean_up(&residual, &model, &psf);
+		return error;
+	}
+
+	bool loaded_dirty = load_image_from_file(residual, config->image_size, config->dirty_input_image);
+	bool loaded_psf = load_image_from_file(psf, config->psf_size, config->psf_input_file);
+
+	if(!loaded_dirty || !loaded_psf)
+	{
+		printf(">>> ERROR: Unable to load dirty or psf image from file, terminating...\n\n");
+		clean_up(&residual, &model, &psf);
+		return error;
+	}
+
+	int num_sources_found = performing_deconvolution(config, residual, model, psf);
+
+	Source *reference_sources = NULL;
+	int number_of_reference_sources = 0;
+	load_sources_from_file(&reference_sources, &number_of_reference_sources, "../unit_test_data/reference_sources.csv");
+
+	if(reference_sources == NULL)
+	{
+		printf(">>> ERROR: Unable to load reference sources from file, terminating...\n\n");
+		clean_up(&residual, &model, &psf);
+		return error;
+	}
+
+	if(number_of_reference_sources != num_sources_found)
+	{
+		printf(">>> ERROR: Number of reference sources (%d) does not match number of found \
+			sources (%d), terminating...\n\n", number_of_reference_sources, num_sources_found);
+		free(reference_sources);
+		clean_up(&residual, &model, &psf);
+		return error;
+	}
+
+	Source *extracted = (Source*) calloc(num_sources_found, sizeof(Source));
+
+	if(extracted == NULL)
+	{
+		printf(">>> ERROR: Unable to reduce model source buffer for evaluation, terminating...\n\n");
+		free(reference_sources);
+		clean_up(&residual, &model, &psf);
+		return error;
+	}
+
+	memcpy(extracted, model, sizeof(Source) * num_sources_found);
+
+	qsort(extracted, num_sources_found, sizeof(Source), compare_sources);
+	qsort(reference_sources, number_of_reference_sources, sizeof(Source), compare_sources);
+
+	PRECISION max_difference = -DBL_MAX;
+
+	for(int src_index = 0; src_index < num_sources_found; ++src_index)
+	{
+		PRECISION temp_diff = ABS(extracted[src_index].intensity - reference_sources[src_index].intensity);
+
+		if(temp_diff > max_difference)
+			max_difference = temp_diff;
+	}
+
+	free(reference_sources);
+	free(extracted);
+	clean_up(&residual, &model, &psf);
+
+	return max_difference;	
+}
+
+int compare_sources(const void *a, const void *b)
+{
+	const Source *src_a = (Source*) a;
+	const Source *src_b = (Source*) b;
+
+	// dealing with conflict on l coordinate
+	if(src_a->l == src_b->l)
+		return (src_a->m > src_b->m) - (src_a->m < src_b->m);
+	else
+		return (src_a->l > src_b->l) - (src_a->l < src_b->l);
 }

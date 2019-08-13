@@ -22,3 +22,9 @@ set(
 
 cuda_add_executable(deconvolution main.cpp deconvolution.cu)
 target_link_libraries(deconvolution m)
+
+#! Unit testing project
+project(unit_test CXX CUDA)
+
+cuda_add_executable(unit_test unit_test.cpp deconvolution.cu)
+target_link_libraries(unit_test m)

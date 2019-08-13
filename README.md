@@ -40,11 +40,17 @@
 To perform memory checking, memory leak analysis, and profiling using [Valgrind](http://valgrind.org/docs/manual/quick-start.html), execute the following (assumes you are in the appropriate *build* folder (see step 5 above):
 ```bash
 $ valgrind --leak-check=yes -v ./deconvolution
+$ valgrind --leak-check=yes -v ./unit_test
 ```
 To execute linting, execute the following commands (assumes you are in the appropriate source code folder):
 ```bash
 $ cppcheck --enable=all main.cpp
 $ cppcheck --enable=all deconvolution.cu
+$ cppcheck --enable=all unit_test.cpp
+```
+To execute the unit test, execute the following command (also assumes appropriate *build* folder):
+```bash
+$ ./unit_test
 ```
 To execute the deconvolution (once configured and built), execute the following command (also assumes appropriate *build* folder):
 ```bash
