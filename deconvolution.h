@@ -94,6 +94,8 @@ extern "C" {
 		int gpu_max_threads_per_block_dimension;
 		int gpu_max_threads_per_block;
 		bool report_flux_each_cycle;
+		double weak_source_percent;
+		double noise_detection_factor;
 	} Config;
 
 	typedef struct Complex {
@@ -125,12 +127,11 @@ extern "C" {
 	__global__ void find_max_source_row_reduction(const PRECISION *residual, PRECISION3 *local_max, const int image_size);
 
 	__global__ void find_max_source_col_reduction(PRECISION3 *sources, const PRECISION3 *local_max, const int cycle_number,
-		const int image_size, const PRECISION loop_gain, const double flux);
+		const int image_size, const PRECISION loop_gain, const double flux, const double weak_source_percent,
+		const double noise_detection_factor);
 
 	__global__ void subtract_psf_from_residual(PRECISION *residual, PRECISION3 *sources, const PRECISION *psf, 
 		const int cycle_number, const int image_size, const int psf_size, const PRECISION loop_gain);
-
-	__device__ double atomic_max(double *address, double value);
 
 	__global__ void compress_sources(PRECISION3 *sources);
 

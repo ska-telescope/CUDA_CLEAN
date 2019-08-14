@@ -41,7 +41,7 @@
 
 // keeps track of running sum of model sources found
 __device__ double d_flux = 0.0;
-__device__ bool d_exitConditionFound = false;
+__device__ bool d_exit_early = false;
 __device__ int d_source_counter = 0;
 
 void init_config(Config *config)
@@ -59,6 +59,12 @@ void init_config(Config *config)
 	config->gpu_max_threads_per_block_dimension = 32;
 
 	config->report_flux_each_cycle = false;
+
+	config->weak_source_percent = 0.01; // example: 0.05 = 5%
+
+	// Used to determine if we are extracting noise, based on the assumption
+	// that located source < noise_detection_factor * running_average
+	config->noise_detection_factor = 2.0;
 
 	config->dirty_input_image = "../sample_data/dirty_image_1024.csv";
 
@@ -115,7 +121,7 @@ int performing_deconvolution(Config *config, PRECISION *dirty_image, Source *mod
 
 	int cycle_number = 0;
 	double flux = 0.0;
-	bool exitConditionFound = false;
+	bool exit_early = false;
 
 	//starting timer here
 	cudaEvent_t start, stop;
@@ -123,7 +129,7 @@ int performing_deconvolution(Config *config, PRECISION *dirty_image, Source *mod
 	cudaEventCreate(&stop);
 	cudaEventRecord(start);
 
-	while(cycle_number < config->number_minor_cycles && !exitConditionFound)
+	while(cycle_number < config->number_minor_cycles)
 	{
 		// Find local row maximum via reduction
 		find_max_source_row_reduction<<<reduction_blocks, reduction_threads>>>
@@ -132,7 +138,8 @@ int performing_deconvolution(Config *config, PRECISION *dirty_image, Source *mod
 
 		// Find final image maximum via column reduction (local maximums array)
 		find_max_source_col_reduction<<<1, 1>>>
-			(d_sources, d_max_locals, cycle_number, config->image_size, config->loop_gain, flux);
+			(d_sources, d_max_locals, cycle_number, config->image_size, config->loop_gain, flux, 
+			 config->weak_source_percent, config->noise_detection_factor);
 		cudaDeviceSynchronize();
 
 		subtract_psf_from_residual<<<psf_blocks, psf_threads>>>
@@ -147,11 +154,14 @@ int performing_deconvolution(Config *config, PRECISION *dirty_image, Source *mod
 
 		compress_sources<<<1, 1>>>(d_sources);
 
-		cudaMemcpyFromSymbol(&exitConditionFound, d_exitConditionFound, sizeof(bool), 0, cudaMemcpyDeviceToHost);
+		cudaMemcpyFromSymbol(&exit_early, d_exit_early, sizeof(bool), 0, cudaMemcpyDeviceToHost);
 		cudaDeviceSynchronize();
 
-		if(exitConditionFound)
+		if(exit_early)
+		{
 			printf(">>> UPDATE: Terminating minor cycles as now just cleaning noise...\n\n");
+			break;
+		}
 
 		if(config->report_flux_each_cycle)
 			printf(">>> INFO: Cycle %d reports flux: %.5e\n\n", cycle_number, flux);
@@ -205,13 +215,13 @@ __global__ void find_max_source_row_reduction(const PRECISION *residual, PRECISI
 			max.z = current;
 		}
 	}
-	//y coordinate holds the average in this row
-	max.y = max.y / image_size;
+	
 	local_max[row_index] = max;
 }
 
 __global__ void find_max_source_col_reduction(PRECISION3 *sources, const PRECISION3 *local_max, const int cycle_number,
-	const int image_size, const PRECISION loop_gain, const double flux)
+	const int image_size, const PRECISION loop_gain, const double flux, const double weak_source_percent,
+	const double noise_detection_factor)
 {
 	unsigned int col_index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -235,16 +245,22 @@ __global__ void find_max_source_col_reduction(PRECISION3 *sources, const PRECISI
 			max = current;
 	}
 
-	running_avg /= image_size;
-
+	running_avg /= (image_size * image_size);
 	max.z *= loop_gain;
-	sources[d_source_counter] = max;
-	++d_source_counter;
 	
-	d_flux = flux + max.z;
-	//d_exitConditionFound = (max.z < 2.0 * runningAverage * loop_gain);
-}
+	// determine whether we drop out and ignore this source
+	bool extracting_noise = max.z < noise_detection_factor * running_avg * loop_gain;
+	bool weak_source = max.z < sources[0].z * weak_source_percent;
+	d_exit_early = extracting_noise || weak_source;
 
+	if(d_exit_early)
+		return;
+
+	// source was reasonable, so we keep it
+	sources[d_source_counter] = max;
+	d_flux = flux + max.z;
+	++d_source_counter;
+}
 
 __global__ void compress_sources(PRECISION3 *sources)
 {
@@ -254,7 +270,7 @@ __global__ void compress_sources(PRECISION3 *sources)
 		return;
 
 	PRECISION3 last_source = sources[d_source_counter - 1];
-	for(int i = d_source_counter - 2;i >= 0; --i)
+	for(int i = d_source_counter - 2; i >= 0; --i)
 	{
 		if((int)last_source.x == (int)sources[i].x && (int)last_source.y == (int)sources[i].y)
 		{
@@ -453,6 +469,8 @@ void unit_test_init_config(Config *config)
 	config->gpu_max_threads_per_block = 1024;
 	config->gpu_max_threads_per_block_dimension = 32;
 	config->report_flux_each_cycle = false;
+	config->weak_source_percent = 0.0; // never exit early
+	config->noise_detection_factor = 2.0;
 	config->dirty_input_image = "../unit_test_data/dirty_image_1024.csv";
 	config->psf_input_file = "../unit_test_data/point_spread_function_1024.csv";
 }
